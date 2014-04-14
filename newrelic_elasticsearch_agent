@@ -7,12 +7,13 @@ require 'net/http'
 require 'uri'
 require 'socket'
 require 'json'
+require 'openssl'
 
 module ElasticsearchStatsAgent
 
   class Agent < NewRelic::Plugin::Agent::Base
 
-    agent_guid 'com.secondimpression.newrelic-elasticsearch-agent'
+    agent_guid 'com.martinknafve.newrelic-elasticsearch-agent'
     agent_version '0.0.1'
     agent_config_options :name, :url, :index, :username, :password
     agent_human_labels('ElasticSearch') { name }
@@ -32,7 +33,21 @@ module ElasticsearchStatsAgent
         return nil
       end
 
+
+      clusterHealth = JSON.parse(get_elasticsearch_cluster_status)
+	  report_metric "Cluster/ActivePrimaryShards",          "Count",        clusterHealth["active_primary_shards"]         if clusterHealth["active_primary_shards"]
+	  report_metric "Cluster/ActiveShards",          		"Count",        clusterHealth["active_shards"]         if clusterHealth["active_shards"]
+	  report_metric "Cluster/RelocatingShards",          	"Count",        clusterHealth["relocating_shards"]         if clusterHealth["relocating_shards"]
+	  report_metric "Cluster/InitializingShards",           "Count",        clusterHealth["initializing_shards"]         if clusterHealth["initializing_shards"]
+	  report_metric "Cluster/UnassignedShards",           "Count",        clusterHealth["unassigned_shards"]         if clusterHealth["unassigned_shards"]
+
       json = JSON.parse(get_elasticsearch_status)
+      
+      shards = json["_shards"]
+	  report_metric "Shards/Total",          "Count",        shards["total"]                                               if shards["total"]
+	  report_metric "Shards/Successful",     "Count",        shards["successful"]                                     if shards["successful"]
+	  report_metric "Shards/Failed",         "Count",        shards["failed"]                                             if shards["failed"]
+
       if index == "_all"
         stats = json["_all"]
       else
@@ -80,18 +95,19 @@ module ElasticsearchStatsAgent
         report_metric "Search/Fetch/Time",        "Milliseconds",     total["search"]["fetch_time_in_millis"]                             if total["search"]["fetch_time_in_millis"]
         report_metric "Search/Fetch/Rate",        "Fetches/sec",      @search_fetch_rate.process(total["search"]["fetch_total"])          if total["search"]["fetch_total"]
       end
+
+
     end
 
     private
 
     def get_elasticsearch_status
       begin
+	  
         u = URI.parse("#{url}/#{index}/_stats")
         r = ::Net::HTTP::Get.new(u.path)
-
-        if username.to_s != ''
-          r.basic_auth username, password
-        end
+        r.use_ssl = true if u.scheme.casecmp("https") == 0
+        r.basic_auth(username, password) unless username.to_s.empty?
 
         http = ::Net::HTTP.new(u.host, u.port)
         http.open_timeout = 5
@@ -117,6 +133,43 @@ module ElasticsearchStatsAgent
       end
       return resp.body
     end
+
+ def get_elasticsearch_cluster_status
+      begin
+	  
+        u = URI.parse("#{url}/_cluster/health")
+        r = ::Net::HTTP::Get.new(u.path)
+        r.use_ssl = true if u.scheme.casecmp("https") == 0
+        r.basic_auth(username, password) unless username.to_s.empty?
+
+        http = ::Net::HTTP.new(u.host, u.port)
+        http.open_timeout = 5
+        http.read_timeout = 5
+        resp = http.request(r)
+      rescue Timeout::Error
+        print "ERROR while gathering stats from #{url}: connect/read timeout\n"
+        return nil
+      rescue Exception => e
+        print "ERROR while gathering stats from #{url}: #{e.message}\n"
+        return nil
+      end
+
+      if !resp.is_a?(Net::HTTPSuccess)
+        print "ERROR while gathering stats from #{url}: "
+        print "#{resp.code} #{resp.message}\n"
+        return nil
+      end
+
+      if resp.content_type != "application/json"
+        print "ERROR while parsing stats from #{url}: Excepted JSON"
+        return nil
+      end
+      return resp.body
+    end
+
+
+
+
   end
 
   NewRelic::Plugin::Config.config_file = File.dirname(__FILE__) + '/config/newrelic_plugin.yml'
@@ -124,4 +177,5 @@ module ElasticsearchStatsAgent
 
   NewRelic::Plugin::Run.setup_and_run
 end
+
 
